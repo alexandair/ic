@@ -1,0 +1,152 @@
+#!/bin/bash
+
+# TUTORIAL: Create virtual machines with the Azure CLI
+# https://docs.microsoft.com/en-us/cli/azure/azure-cli-vm-tutorial?view=azure-cli-latest
+
+# LOG IN
+# If you're using a local install of the CLI, you need to log in before performing any other steps.
+
+az login
+
+# CREATE A RESOURCE GROUP
+# In Azure, all resources are allocated in a resource management group.
+# Resource groups provide logical groupings of resources that make them easier to work with as a collection.
+# For this tutorial, all of the created resources go into a single group named TutorialResources2.
+
+az group create --name TutorialResources2 --location westeurope
+
+# CREATE A VIRTUAL MACHINE
+# Virtual machines in Azure have a large number of dependencies.
+# The CLI creates these resources for you based on the command-line arguments you specify.
+# Create a new virtual machine running Ubuntu, which uses SSH authentication for login.
+
+az vm create --resource-group TutorialResources2 \
+  --name TutorialVM1 \
+  --image UbuntuLTS \
+  --generate-ssh-keys \
+  --verbose
+
+  #NOTE: If you have an SSH key named id_rsa already available,
+  # this key is used for authentication rather than having a new key generated.
+
+  # Once the VM is ready, JSON is returned from the Azure service including the public IP address.
+  # Confirm that the VM is running by connecting over SSH.
+
+  # ssh <PUBLIC_IP_ADDRESS>
+
+# There are other ways to get this IP address after the VM has started.
+# In the next section you will see how to get detailed information on the VM, and how to filter it.
+
+# GET VM INFORMATION WITH QUERIES
+# Now that a VM has been created, detailed information about it can be retrieved.
+# The common command for getting information from a resource is show.
+
+az vm show --name TutorialVM1 --resource-group TutorialResources2
+
+# You'll see a lot of information, which can be difficult to parse visually.
+# The returned JSON contains information on authentication, network interfaces, storage, and more.
+# Most importantly, it contains the Azure object IDs for resources that the VM is connected to.
+# Object IDs allow accessing these resources directly to get more information about the VM's configuration and capabilities. 
+# In order to extract the object ID we want, the --query argument is used.
+# Queries are written in the JMESPath query language.
+# Start with getting the network interface controller (NIC) object ID.
+
+az vm show --name TutorialVM1 \
+  --resource-group TutorialResources2 \
+  --query 'networkProfile.networkInterfaces[].id' \
+  --output tsv
+
+ # There's a lot going on here, just by adding the query.
+ # Each part of it references a key in the output JSON, or is a JMESPath operator.
+    # networkProfile is a key of the top-level JSON, which has networkInterfaces as a subkey.
+    # If a JSON value is a dictionary, its keys are referenced from the parent key with the . operator.
+    # The networkInterfaces value is an array, so it is flattened with the [] operator.
+    # This operator runs the remainder of the query on each array element.
+    # In this case, it gets the id value of every array element.
+
+# The output format tsv (tab-separated values) is guaranteed to only include the result data and whitespace consisting of tabs and newlines.
+# Since the returned value is a single bare string, it's safe to assign directly to an environment variable.
+
+# Go ahead and assign the NIC object ID to an environment variable now.
+
+NIC_ID=$(az vm show -n TutorialVM1 -g TutorialResources2 \
+  --query 'networkProfile.networkInterfaces[].id' \
+  -o tsv)
+
+# This example also demonstrates the use of short arguments.
+# You may use -g instead of --resource-group, -n instead of --name, and -o instead of --output.
+
+# SET ENVIRONMENT VARIABLES FROM CLI OUTPUT
+# Now that you have the NIC ID, run az network nic show to get its information.
+
+az network nic show --ids $NIC_ID -g TutorialResources2
+
+# This command shows all of the information for the network interface of the VM.
+# This data includes DNS settings, IP information, security settings, and the MAC address.
+# Right now the goal is to obtain the public IP address and subnet object IDs.
+
+az network nic show --ids $NIC_ID \
+  -g TutorialResources2 \
+  --query '{IP:ipConfigurations[].publicIpAddress.id, Subnet:ipConfigurations[].subnet.id}'
+
+ # This command displays a JSON object that has custom keys ('IP' and 'Subnet') for the extracted values.
+ # While this style of output might not be useful for command-line tools, it helps with human readability
+ # and can be used with custom scripts.
+
+# In order to use command-line tools, change the command to remove the custom JSON keys and output as tsv.
+# This style of output can be processed by the shell read command to load results into multiple variables.
+# Since two values on separate lines are displayed, the read command delimiter must be set to the empty string
+# rather than the default of non-newline whitespace.
+
+read -d '' IP_ID SUBNET_ID <<< $(az network nic show \
+  --ids $NIC_ID -g TutorialResources2 \
+  --query '[ipConfigurations[].publicIpAddress.id, ipConfigurations[].subnet.id]' \
+  -o tsv)
+
+# You won't use the subnet ID right away, but it should be stored now to avoid having to perform a second lookup later.
+# For now, use the public IP object ID to look up the public IP address and store it in a shell variable.
+
+VM1_IP_ADDR=$(az network public-ip show --ids $IP_ID \
+  -g TutorialResources2 \
+  --query ipAddress \
+  -o tsv)
+
+ # Now you have the IP address of the VM stored in a shell variable.
+ # Go ahead and check that it is the same value that you used to initially connect to the VM.
+
+ echo $VM1_IP_ADDR
+
+ # CREATING A NEW VM ON THE EXISTING SUBNET
+ # The second VM uses the existing subnet.
+ # You can skip a few steps to get the public IP address of the new VM stored into an environment variable
+ # right away, since it's returned in the VM creation information.
+ # If you'd need other information about the VM later, it can always be obtained from the az vm show command.
+
+ VM2_IP_ADDR=$(az vm create -g TutorialResources2 \
+  -n TutorialVM2 \
+  --image UbuntuLTS \
+  --generate-ssh-keys \
+  --subnet $SUBNET_ID \
+  --query publicIpAddress \
+  -o tsv)
+
+  # Using the stored IP address, SSH into the newly created VM.
+
+  ssh $VM2_IP_ADDR
+
+  # Go ahead and log out from the VM.
+
+  #CLEANUP
+  # You can delete individual resources with the delete command,
+  # but the safest way to remove all resources in a resource group is with group delete.
+
+  az group delete --name TutorialResources2 --no-wait
+
+  # This command deletes the resources created during the tutorial, and is guaranteed to deallocate them in the correct order.
+  # The --no-wait parameter keeps the CLI from blocking while the deletion takes place.
+  # If you want to wait until the deletion is complete or watch it progress, use the group wait command.
+
+  az group wait --name TutorialResources2 --deleted
+
+  # With cleanup completed, the tutorial is finished.
+
